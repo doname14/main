@@ -1,0 +1,144 @@
+version: "3.8"
+
+services:
+  traefik:
+    image: traefik:v3.1
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.myresolver.acme.tlschallenge=true"
+      - "--certificatesresolvers.myresolver.acme.email=doname14@gmail.com"
+      - "--certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json"
+      - "--providers.docker.network=app_stack_app_network"
+      - "--log.level=DEBUG"
+    ports:
+      - "8081:80"
+      - "8443:443"
+      - "8080:8080"
+      # - "80:80"
+      # - "443:443"
+      # - "8080:8080"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "traefik-certificates:/letsencrypt"
+    networks:
+      - app_network
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik.rule=Host(`traefik.localhost`)"
+      - "traefik.http.routers.traefik.service=api@internal"
+      - "traefik.http.routers.traefik.entrypoints=web"
+      - "traefik.http.middlewares.auth.basicauth.users=admin:$$apr1$$9Cv/OMGj$$ZomWQzuQbL.3TRCS81A1g/"
+
+  backend:
+    image: localhost:5000/backend:latest
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+    environment:
+      - DJANGO_SETTINGS_MODULE=backend.settings
+      - PYTHONUNBUFFERED=1
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.app_stack_backend.entrypoints=web"
+      - "traefik.http.routers.app_stack_backend.rule=Host(`localhost`) && (PathPrefix(`/auth`) || PathPrefix(`/ws/langflow`))"
+      - "traefik.http.routers.app_stack_backend.service=app_stack_backend"
+      - "traefik.http.services.app_stack_backend.loadbalancer.server.port=8000"
+    networks:
+      - app_network
+    depends_on:
+      - redis
+      - langflow
+    command: >
+      sh -c "python manage.py makemigrations &&
+             python manage.py migrate &&
+             daphne -b 0.0.0.0 -p 8000 backend.asgi:application"
+
+  redis:
+    image: "redis:alpine"
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+    volumes:
+      - "redis_data:/data"
+    networks:
+      - app_network
+    labels:
+      - "traefik.enable=false"
+
+  langflow:
+    image: langflowai/langflow:latest
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+    environment:
+      - LANGFLOW_HOST=0.0.0.0
+      - LANGFLOW_PORT=7860
+      - LANGFLOW_DATABASE_URL=sqlite:///langflow.db
+      - LANGFLOW_SUPERUSER=admin@admin.com
+      - LANGFLOW_SUPERUSER_PASSWORD=admin
+      - OPENAI_API_KEY=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
+
+    # volumes:
+    #   - "langflow_data:/app/backend/langflow.db"
+    labels:
+    - "traefik.enable=true"
+    # Main router for /langflow
+    - "traefik.http.routers.app_stack_langflow.entrypoints=web"
+    - "traefik.http.routers.app_stack_langflow.rule=Host(`localhost`) && PathPrefix(`/langflow`)"
+    - "traefik.http.routers.app_stack_langflow.service=app_stack_langflow"
+    - "traefik.http.middlewares.langflow-stripprefix.stripprefix.prefixes=/langflow"
+    - "traefik.http.routers.app_stack_langflow.middlewares=langflow-stripprefix"
+    # Assets router for /assets
+    - "traefik.http.routers.langflow-assets.entrypoints=web"
+    - "traefik.http.routers.langflow-assets.rule=Host(`localhost`) && PathPrefix(`/assets`)"
+    - "traefik.http.routers.langflow-assets.service=app_stack_langflow"
+    # Login router for /login
+    - "traefik.http.routers.langflow-login.entrypoints=web"
+    - "traefik.http.routers.langflow-login.rule=Host(`localhost`) && PathPrefix(`/login`)"
+    - "traefik.http.routers.langflow-login.service=app_stack_langflow"
+    # API router for /api
+    - "traefik.http.routers.langflow-api.entrypoints=web"
+    - "traefik.http.routers.langflow-api.rule=Host(`localhost`) && PathPrefix(`/api`)"
+    - "traefik.http.routers.langflow-api.service=app_stack_langflow"
+    # WebSocket router for /ws
+    - "traefik.http.routers.langflow-ws.entrypoints=web"
+    - "traefik.http.routers.langflow-ws.rule=Host(`localhost`) && PathPrefix(`/ws`)"
+    - "traefik.http.routers.langflow-ws.service=app_stack_langflow"
+    # Health check router for /health_check
+    - "traefik.http.routers.langflow-health.entrypoints=web"
+    - "traefik.http.routers.langflow-health.rule=Host(`localhost`) && PathPrefix(`/health_check`)"
+    - "traefik.http.routers.langflow-health.service=app_stack_langflow"
+    - "traefik.http.services.app_stack_langflow.loadbalancer.server.port=7860"
+    networks:
+      - app_network
+
+volumes:
+  traefik-certificates:
+    driver: local
+  redis_data:
+    driver: local
+  langflow_data:
+    driver: local
+
+networks:
+  app_network:
+    driver: overlay
+    attachable: true

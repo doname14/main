@@ -1,0 +1,118 @@
+version: "3.8"
+
+services:
+  traefik:
+    image: traefik:v3.1
+    command:
+      - "--api.insecure=true" # Enable insecure API
+      - "--providers.docker=true" # Enable Docker provider. It runs both in swarm and standalone mode
+      - "--providers.docker.exposedbydefault=false" # Exclude services by default. We will use labels to expose services
+      - "--entrypoints.web.address=:80" # HTTP entrypoint. We will use labels to expose services
+      - "--entrypoints.websecure.address=:443" # HTTPS entrypoint. We will use labels to expose services
+      - "--certificatesresolvers.myresolver.acme.tlschallenge=true" # Enable TLS challenge. We will use labels to expose services
+      - "--certificatesresolvers.myresolver.acme.email=doname14@gmail.com" # Email for Let's Encrypt. We will use labels to expose services
+      - "--certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json" # Storage path for Let's Encrypt
+      - "--providers.docker.network=app_stack_app_network" # Network for Docker services
+      - "--log.level=DEBUG" # Log level. We will use labels to expose services
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "traefik-certificates:/letsencrypt"
+    networks:
+      - app_network
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+    labels:
+      - "traefik.enable=true" # Enable Traefik. We will use labels to expose services
+      - "traefik.http.routers.traefik.rule=Host(`traefik.localhost`)" # Rule for the router. We will use labels to expose services
+      - "traefik.http.routers.traefik.service=api@internal" # Service for the router. We will use labels to expose services
+      - "traefik.http.routers.traefik.entrypoints=web" # Entrypoints for the router. We will use labels to expose services
+      - "traefik.http.middlewares.auth.basicauth.users=admin:$$apr1$$9Cv/OMGj$$ZomWQzuQbL.3TRCS81A1g/" # Basic auth for the router. We will use labels to expose services
+
+  backend:
+    image: localhost:5000/backend:latest
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+    environment:
+      - DJANGO_SETTINGS_MODULE=backend.settings
+      - PYTHONUNBUFFERED=1 # Unbuffer stdout and stderr. 
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.app_stack_backend.entrypoints=web" # Entrypoints for the router. We will use labels to expose services
+      - "traefik.http.routers.app_stack_backend.rule=Host(`localhost`) && (PathPrefix(`/auth`) || PathPrefix(`/ws/langflow`))" # Rule for the router. We will use labels to expose services
+      - "traefik.http.routers.app_stack_backend.service=app_stack_backend" # Service for the router. We will use labels to expose services
+      - "traefik.http.services.app_stack_backend.loadbalancer.server.port=8000" # Port for the service. We will use labels to expose services
+      # - "traefik.http.routers.app_stack_backend.rule=Host(`backend.localhost`) && (PathPrefix(`/api/auth`) || PathPrefix(`/ws/langflow`))"
+    networks:
+      - app_network
+    depends_on:
+      - redis
+      - langflow
+    command: >
+      sh -c "python manage.py makemigrations &&
+             python manage.py migrate &&
+             daphne -b 0.0.0.0 -p 8000 backend.asgi:application"
+
+  redis:
+    image: "redis:alpine"
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+    volumes:
+      - "redis_data:/data"
+    networks:
+      - app_network
+    labels:
+      - "traefik.enable=false"
+
+  langflow:
+    image: langflowai/langflow:latest
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+    environment:
+      - LANGFLOW_HOST=0.0.0.0
+      - LANGFLOW_PORT=7860
+      - LANGFLOW_DATABASE_URL=sqlite:///langflow.db
+      - LANGFLOW_SUPERUSER=admin@admin.com
+      - LANGFLOW_SUPERUSER_PASSWORD=admin
+    volumes:
+      - "langflow_data:/app/backend/langflow.db"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.app_stack_langflow.entrypoints=web"
+      - "traefik.http.routers.app_stack_langflow.rule=Host(`localhost`) && PathPrefix(`/langflow`)"
+      - "traefik.http.services.app_stack_langflow.loadbalancer.server.port=7860"
+    networks:
+      - app_network
+
+volumes:
+  traefik-certificates:
+    driver: local
+  redis_data:
+    driver: local
+  langflow_data:
+    driver: local
+  # openedx_data:
+  #   driver: local
+
+networks:
+  app_network:
+    driver: overlay
+    attachable: true
